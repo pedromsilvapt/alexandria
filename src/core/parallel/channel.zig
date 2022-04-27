@@ -126,7 +126,7 @@ pub fn Channel(comptime BufferType: type) type {
             try self.internalSend(msg, true);
         }
 
-        pub fn internalReceive(self: *@This(), comptime blocking: bool) !(if (blocking) *Elem else ?*Elem) {
+        pub fn internalReceive(self: *@This(), comptime blocking: bool) !(if (blocking) Elem else ?Elem) {
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -151,7 +151,7 @@ pub fn Channel(comptime BufferType: type) type {
 
             if (self.closed) return error.ChannelClosed;
 
-            var msg = &self.buffer[self.cursor];
+            var msg = self.buffer[self.cursor];
 
             self.cursor += 1;
             self.size -= 1;
@@ -176,14 +176,6 @@ pub fn Channel(comptime BufferType: type) type {
         }
 
         pub fn receive(self: *@This()) !Elem {
-            return try self.internalReceive(true).*;
-        }
-
-        pub fn tryReceivePtr(self: *@This()) !?*Elem {
-            return try self.internalReceive(false);
-        }
-
-        pub fn receivePtr(self: *@This()) !*Elem {
             return try self.internalReceive(true);
         }
     };
