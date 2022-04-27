@@ -1,6 +1,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = @import("std").mem.Allocator;
+const MerkleSerializer = @import("./serializer.zig").MerkleSerializer;
 
 /// Zig implementation of a Complete Binary Merkle Tree, 
 /// by looking only at the README of https://github.com/nervosnetwork/merkle-tree
@@ -198,6 +199,10 @@ pub fn Merkle(
             return self.shape.getLeafsSlice(self.nodes);
         }
 
+        pub fn getLeafsSliceConst(self: *const @This()) []NodeType {
+            return self.shape.getLeafsSlice(self.nodes);
+        }
+
         pub fn rehash(self: *@This()) void {
             // If we only have one leaf, then we also have one node only
             // That node is both the leaf and the root of the tree, so there is nothing
@@ -218,25 +223,27 @@ pub fn Merkle(
                 }
             }
         }
+
+        pub usingnamespace MerkleSerializer(@This());
     };
 }
 
-pub fn hashMd5(left: *[16]u8, right: *[16]u8, result: *[16]u8) void {
-    var md5 = std.crypto.hash.Md5.init(.{});
-    md5.update(left);
-    md5.update(right);
-    md5.final(result);
+pub fn fromHash(comptime Hasher: type) (fn (left: *[Hasher.digest_length]u8, right: *[Hasher.digest_length]u8, result: *[Hasher.digest_length]u8) void) {
+    return struct {
+        pub fn hash(left: *[Hasher.digest_length]u8, right: *[Hasher.digest_length]u8, result: *[Hasher.digest_length]u8) void {
+            var hasher = Hasher.init(.{});
+            hasher.update(left);
+            hasher.update(right);
+            hasher.final(result);
+        }
+    }.hash;
 }
 
-pub fn hashSha256(left: *[32]u8, right: *[32]u8, result: *[32]u8) void {
-    var sha2 = std.crypto.hash.sha2.Sha256.init(.{});
-    sha2.update(left);
-    sha2.update(right);
-    sha2.final(result);
-}
+pub const hashMd5 = fromHash(std.crypto.hash.Md5);
+pub const hashSha256 = fromHash(std.crypto.hash.sha2.Sha256);
+pub const hashSha512 = fromHash(std.crypto.hash.sha2.Sha512);
 
 pub const MerkleMd5 = Merkle([16]u8, hashMd5);
-
 pub const MerkleSha256 = Merkle([32]u8, hashSha256);
 
 // ------ Shape.init(7)

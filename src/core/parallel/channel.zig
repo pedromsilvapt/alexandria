@@ -9,7 +9,7 @@ pub fn Channel(comptime BufferType: type) type {
         pub const Elem = std.meta.Elem(BufferType);
         pub const buffer_is_slice = @typeInfo(BufferType) != .Array;
 
-        allocator: if (buffer_is_slice) Allocator else void,
+        allocator: if (buffer_is_slice) ?Allocator else void,
         buffer: BufferType,
         cursor: usize = 0,
         size: usize = 0,
@@ -52,7 +52,9 @@ pub fn Channel(comptime BufferType: type) type {
 
         pub fn deinit(self: *@This()) void {
             if (buffer_is_slice) {
-                self.allocator.free(self.buffer);
+                if (self.allocator) |allocator| {
+                    allocator.free(self.buffer);
+                }
             }
         }
 
@@ -124,7 +126,7 @@ pub fn Channel(comptime BufferType: type) type {
             try self.internalSend(msg, true);
         }
 
-        pub fn internalReceive(self: *@This(), comptime blocking: bool) !(if (blocking) Elem else ?Elem) {
+        pub fn internalReceive(self: *@This(), comptime blocking: bool) !(if (blocking) *Elem else ?*Elem) {
             self.mutex.lock();
             defer self.mutex.unlock();
 
@@ -149,7 +151,7 @@ pub fn Channel(comptime BufferType: type) type {
 
             if (self.closed) return error.ChannelClosed;
 
-            var msg = self.buffer[self.cursor];
+            var msg = &self.buffer[self.cursor];
 
             self.cursor += 1;
             self.size -= 1;
@@ -174,6 +176,14 @@ pub fn Channel(comptime BufferType: type) type {
         }
 
         pub fn receive(self: *@This()) !Elem {
+            return try self.internalReceive(true).*;
+        }
+
+        pub fn tryReceivePtr(self: *@This()) !?*Elem {
+            return try self.internalReceive(false);
+        }
+
+        pub fn receivePtr(self: *@This()) !*Elem {
             return try self.internalReceive(true);
         }
     };

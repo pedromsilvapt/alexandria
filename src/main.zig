@@ -1,5 +1,8 @@
 const std = @import("std");
-const FileHash = @import("./core/file_hash.zig").FileHashMd5;
+const FileHash = @import("./core/file_hash.zig").FileHashSha512;
+
+const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
 pub fn main() anyerror!void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -8,14 +11,86 @@ pub fn main() anyerror!void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    if (std.ascii.eqlIgnoreCase(args[1], "serialize")) {
+        try serializeFile(allocator, args[2], args[3]);
+    } else if (std.ascii.eqlIgnoreCase(args[1], "reserialize")) {
+        try reserializeFile(allocator, args[2], args[3]);
+    } else {
+        std.log.err("Invalid command given, expected 'serialize' or 'reserialize", .{});
+    }
+}
+
+pub fn serializeFile(
+    allocator: Allocator,
+    hashes_folder_path: []const u8,
+    source_file_name: []const u8,
+) !void {
     std.log.info("File hash test.", .{});
 
-    var file = try FileHash.initEmpty(allocator, args[1]);
+    var file = try FileHash.initEmpty(allocator, source_file_name);
     defer file.deinit();
 
     std.log.info("Piece Count = {}, Total Nodes' Size = {} bytes.", .{ file.piece_count, file.hash_tree.shape.getTotalSizeOfNodes() });
 
     try TerminalHashProgress.run(&file);
+
+    var file_name = file.getSerializedFileName();
+    std.log.info("Serializing file to = {s}", .{file_name});
+
+    // Serialize
+    try file.serializeInFolderPath(hashes_folder_path, .{ .nodes = .leafs });
+
+    // Deserialize
+    var file2 = try FileHash.deserializeFromFolderPath(allocator, hashes_folder_path, &file_name);
+    defer file2.deinit();
+
+    var root_node = file2.hash_tree.nodes[0];
+    std.log.info("Deserialized node is = {}", .{std.fmt.fmtSliceHexLower(&root_node)});
+
+    // Compare all the hashes and assert that they match
+    assert(std.mem.eql(
+        u8,
+        std.mem.sliceAsBytes(file.hash_tree.nodes),
+        std.mem.sliceAsBytes(file2.hash_tree.nodes),
+    ));
+
+    std.log.info("All hashes match!", .{});
+}
+
+pub fn reserializeFile(
+    allocator: Allocator,
+    hashes_folder_path: []const u8,
+    source_file_name: []const u8,
+) !void {
+    std.log.info("Serialize and Deserialize test.", .{});
+
+    // Deserialize
+    var file = try FileHash.deserializeFromFolderPath(allocator, hashes_folder_path, source_file_name);
+    defer file.deinit();
+
+    var file_name = file.getSerializedFileName();
+    std.log.info("Serializing file to = {s}", .{file_name});
+
+    std.log.info("Serializing file to = {s}", .{file_name});
+
+    // Serialize
+    try file.serializeInFolderPath(hashes_folder_path, .{ .nodes = .leafs });
+
+    // Deserialize
+    var file2 = try FileHash.deserializeFromFolderPath(allocator, hashes_folder_path, &file_name);
+    defer file2.deinit();
+
+    var root_node = file2.hash_tree.nodes[0];
+    std.log.info("Deserialized node is = {}", .{std.fmt.fmtSliceHexLower(&root_node)});
+
+    // Compare all the hashes and assert that they match
+    assert(std.mem.eql(
+        u8,
+        std.mem.sliceAsBytes(file.hash_tree.nodes),
+        std.mem.sliceAsBytes(file2.hash_tree.nodes),
+    ));
+
+    std.log.info("All hashes match!", .{});
 }
 
 pub const TerminalHashProgress = struct {

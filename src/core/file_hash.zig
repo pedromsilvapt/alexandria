@@ -1,12 +1,18 @@
 const std = @import("std");
 const io = std.io;
-const MerkleMd5 = @import("./merkle.zig").MerkleMd5;
-const MerkleSha256 = @import("./merkle.zig").MerkleSha256;
 const Allocator = std.mem.Allocator;
 const Signal = @import("./signal.zig").Signal;
+const GenericMerkle = @import("./merkle.zig").Merkle;
+const fromHash = @import("./merkle.zig").fromHash;
+const FileHashSerializer = @import("./serializer.zig").FileHashSerializer;
+const ComputePool = @import("./parallel/compute_pool.zig").ComputePool;
 
-pub fn FileHash(comptime Merkle: type, comptime Hasher: type) type {
+pub fn FileHash(comptime algorithm: HashingAlgorithm, comptime Hasher: type) type {
     return struct {
+        pub const Merkle = GenericMerkle([Hasher.digest_length]u8, fromHash(Hasher));
+
+        pub const algorithm = algorithm;
+
         file_path: []const u8,
         size: u64,
         piece_size: u64,
@@ -55,6 +61,10 @@ pub fn FileHash(comptime Merkle: type, comptime Hasher: type) type {
                 .piece_count = piece_count,
                 .hash_tree = hash_tree,
             };
+        }
+
+        pub fn deinit(self: *@This()) void {
+            self.hash_tree.deinit();
         }
 
         pub fn rehash(self: *@This()) !void {
@@ -200,9 +210,20 @@ pub fn FileHash(comptime Merkle: type, comptime Hasher: type) type {
 
             return div;
         }
+
+        pub usingnamespace FileHashSerializer(@This());
     };
 }
 
-pub const FileHashMd5 = FileHash(MerkleMd5, std.crypto.hash.Md5);
+/// These values are used for serialization purposes. Do not change them!
+pub const HashingAlgorithm = enum(u4) {
+    md5 = 1,
+    sha256 = 2,
+    sha512 = 3,
+};
 
-pub const FileHashSha256 = FileHash(MerkleSha256, std.crypto.hash.sha2.Sha256);
+pub const FileHashMd5 = FileHash(HashingAlgorithm.md5, std.crypto.hash.Md5);
+
+pub const FileHashSha256 = FileHash(HashingAlgorithm.sha256, std.crypto.hash.sha2.Sha256);
+
+pub const FileHashSha512 = FileHash(HashingAlgorithm.sha512, std.crypto.hash.sha2.Sha512);
