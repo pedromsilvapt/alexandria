@@ -61,10 +61,12 @@ pub fn FileHashSerializer(comptime FileHash: type) type {
         }
 
         // Compile-time constant for our file name buffer size
-        pub const hash_file_name_len = bitHexSize(@bitSizeOf(FileHash.Merkle.NodeType));
+        pub const hash_file_name_len = bitHexSizeOf(FileHash.Merkle.NodeType);
         pub const hash_file_extension_len = ".hash".len;
         pub const HashFileNameArray = [hash_file_name_len + hash_file_extension_len]u8;
 
+        /// Return a stack-allocated buffer of type [x]u8 containing the ASCII hexadecimal value containing the canonical
+        /// file name for this file hash structure. The file name is the hexadecimal root hash with the .hash file extension.
         pub fn getSerializedFileName(self: FileHash) HashFileNameArray {
             var file_name: HashFileNameArray = [_]u8{0} ** (hash_file_name_len + hash_file_extension_len);
 
@@ -82,6 +84,10 @@ pub fn FileHashSerializer(comptime FileHash: type) type {
             return file_name;
         }
 
+        /// Serialize this hash file in the given folder. If a file already exists there with the same name, it is truncated and overwritten!
+        /// The file name is <root_hash>.hash, where the root hash is the hash stored at the root of the merkle tree.
+        /// Accepts an options parameter to finetune the serialization process. Right now only supports configuring if all nodes are serialized,
+        /// or only the leafs. Storing only the leafs cuts the file size in half, while very slightly increasing the deserialization time.
         pub fn serializeInFolderPath(self: FileHash, folder_path: []const u8, options: SerializeOptions) !void {
             var directory: std.fs.Dir = try std.fs.cwd().openDir(folder_path, .{});
             defer directory.close();
@@ -99,6 +105,9 @@ pub fn FileHashSerializer(comptime FileHash: type) type {
             try self.serialize(&serializer, options);
         }
 
+        /// Deserialize a file from the given folder, with the given file path.
+        /// Automatically detects if the serialized file is storing only the leafs, in which case automatically
+        /// calculates all the hashes for the rest of the nodes.
         pub fn deserializeFromFolderPath(allocator: Allocator, folder_path: []const u8, file_name: []const u8) !FileHash {
             var directory: std.fs.Dir = try std.fs.cwd().openDir(folder_path, .{});
             defer directory.close();
@@ -107,8 +116,10 @@ pub fn FileHashSerializer(comptime FileHash: type) type {
             var file: std.fs.File = try directory.openFile(file_name, .{ .read = true });
             defer file.close();
 
+            // Create a reader for the serialized hash file
             var reader = file.reader();
 
+            // Initialize the deserializer
             var deserializer = mzg_pack.deserializer(reader, allocator);
 
             return FileHash.deserialize(&deserializer);
@@ -116,20 +127,26 @@ pub fn FileHashSerializer(comptime FileHash: type) type {
     };
 }
 
+/// Calculate the minimum len of an hexadecimal ASCII string, such that it can
+/// represent a buffer with `size` bits (not bytes!)
 pub fn bitHexSize(size: anytype) @TypeOf(size) {
     return std.math.divCeil(usize, size, 4) catch unreachable;
 }
 
+/// Calculate the minimum len of an hexadecimal ASCII string, such that it can
+/// represent a buffer with `@bitSizeOf(T)` bits (not bytes!)
 pub fn bitHexSizeOf(comptime T: type) usize {
     return bitHexSize(@bitSizeOf(T));
 }
 
+/// Returns true if the given type is a fixed-size byte array of some kind (such as [4]u8)
 pub fn isByteArray(comptime T: type) bool {
     const info = @typeInfo(T);
 
     return info == .Array and info.Array.child == u8;
 }
 
+/// Mixin implementing serialization methods for a Merkle Tree.
 pub fn MerkleSerializer(comptime Merkle: type) type {
     return struct {
         pub fn serialize(self: Merkle, serializer: anytype, options: SerializeOptions) !void {
@@ -155,6 +172,7 @@ pub fn MerkleSerializer(comptime Merkle: type) type {
         }
 
         pub fn deserialize(deserializer: anytype) !Merkle {
+            // Recreate the options structure that was used to serialize this hash file
             var options = .{
                 .nodes = try deserializer.deserialize(NodesSerialization),
             };
@@ -176,9 +194,9 @@ pub fn MerkleSerializer(comptime Merkle: type) type {
 
             // If the Merkle.NodeType is [_]u8, we can save it in a more compact way
             var deserialized_nodes = if (isByteArray(Merkle.NodeType))
-                std.mem.bytesAsSlice(Merkle.NodeType, try deserializer.deserializeBinInto(std.mem.sliceAsBytes(nodes_buffer)))
+                std.mem.bytesAsSlice(Merkle.NodeType, try deserializer.deserializeBinIntoBuffer(std.mem.sliceAsBytes(nodes_buffer)))
             else
-                try deserializer.deserializeArrayInto(nodes_buffer);
+                try deserializer.deserializeArrayIntoBuffer([]Merkle.NodeType, nodes_buffer);
 
             if (deserialized_nodes.len != nodes_buffer.len) return error.InvalidNodeCount;
 

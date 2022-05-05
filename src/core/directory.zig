@@ -5,7 +5,7 @@ const ArrayListUnmanaged = std.ArrayListUnmanaged;
 
 /// A Directory represents a list of files organized in an hierarchical fashion. 
 /// Each file can have some data associated with it
-pub fn Directory(comptime FileData: type) type {
+pub fn Directory(comptime FileData: type, comptime Options: type) type {
     return struct {
         allocator: Allocator,
         root: Entry = Entry{
@@ -210,6 +210,21 @@ pub fn Directory(comptime FileData: type) type {
             return node;
         }
 
+        /// The caller owns the `manifest` object. When this method ends/fails, it is the responsability
+        /// of the caller to deinit the manifest.
+        pub fn loadFromManifest(self: *@This(), manifest: anytype) !void {
+            while (try manifest.next()) |entry| {
+                _ = try self.addFile(entry.name, entry.kind.file.data);
+            }
+        }
+
+        pub fn loadFromManifestFile(self: *@This(), file_path: []const u8) !void {
+            var manifest = try ManifestReader(std.io.reader.Reader).initFromFile(file_path);
+            defer manifest.deinit();
+
+            try self.loadFromManifest(&manifest);
+        }
+
         /// Return the next path segment. Start is inclusive, end is not inclusive
         /// If the value returns false, it means there was no next segment found in the path
         /// If the value returns true, then the next segment positions are stored
@@ -265,7 +280,109 @@ pub fn Directory(comptime FileData: type) type {
         pub const FileEntry = struct {
             data: FileData,
         };
+
+        //
+        pub fn ManifestReader(comptime ReaderType: type) type {
+            return struct {
+                io_reader: std.io.BufferedReader(4096, ReaderType),
+                line_buffer: [1024 * 4]u8 = [_]u8{0} ** (1024 * 4),
+
+                pub fn init(reader: ReaderType) @This() {
+                    return .{
+                        .io_reader = std.io.bufferedReader(reader),
+                    };
+                }
+
+                pub fn initFromFile(file_path: []const u8) !@This() {
+                    // Open the file
+                    var file: std.fs.File = try std.fs.cwd().openFile(file_path, .{ .read = true });
+
+                    // Initialize the deserializer
+                    return @This().init(file);
+                }
+
+                pub fn deinit(self: *@This()) void {
+                    if (@hasDecl(@TypeOf(self.io_reader), "close")) {
+                        self.io_reader.close();
+                    } else if (@hasDecl(@TypeOf(self.io_reader), "deinit")) {
+                        self.io_reader.deinit();
+                    }
+                }
+
+                pub fn next(self: *@This()) !?Entry {
+                    var reader = self.io_reader.reader();
+
+                    var result: ?Entry = null;
+
+                    while (result == null) {
+                        // Read an entire line into the buffer
+                        var line_buffer = (try reader.readUntilDelimiterOrEof(&self.line_buffer, '\n')) orelse break;
+
+                        var start: usize = 0;
+                        var end: usize = 0;
+
+                        // Skip any whitespaces from the begining
+                        var path = path_blk: {
+                            // Skip white spaces
+                            while (start < line_buffer.len and isWhiteSpace(line_buffer[start])) {
+                                start += 1;
+                            }
+
+                            // If the entire line was whitespace, we can just return an empty slice right away
+                            if (start >= line_buffer.len) break :path_blk &[_]u8{};
+
+                            end = start + 1;
+
+                            while (end < line_buffer.len and line_buffer[end] != ';') {
+                                end += 1;
+                            }
+
+                            break :path_blk line_buffer[start..end];
+                        };
+
+                        // If this line is empty
+                        if (path.len == 0) {
+                            continue;
+                        }
+
+                        // Skip any whitespaces from the begining
+                        var data_str = data_blk: {
+                            start = end + 1;
+
+                            if (start > line_buffer.len) {
+                                return error.UnexpectedBreakLine;
+                            }
+
+                            end = start + 1;
+
+                            while (end < line_buffer.len and line_buffer[end] != ';') {
+                                end += 1;
+                            }
+
+                            break :data_blk line_buffer[start..end];
+                        };
+
+                        var data = try Options.dataFromString(data_str);
+
+                        result = Entry{
+                            .name = path,
+                            .name_owned = false,
+                            .kind = .{
+                                .file = FileEntry{ .data = data },
+                            },
+                        };
+                    }
+
+                    return result;
+                }
+            };
+        }
     };
+}
+
+/// Return true if the character is a whitespace ASCII character.
+fn isWhiteSpace(char: u8) bool {
+    return char == ' ' or char == '\t' or char == '\r';
 }
 
 fn expectEqualEntry(a: anytype, b: anytype) !void {
@@ -301,26 +418,26 @@ test "Walk over a path's segments" {
     var start: usize = 0;
     var end: usize = 0;
 
-    try std.testing.expect(Directory(i32).getNextPathSegment(path, &start, &end));
+    try std.testing.expect(Directory(i32, void).getNextPathSegment(path, &start, &end));
     try std.testing.expectEqual("/".len, start);
     try std.testing.expectEqual("/root".len, end);
     try std.testing.expectEqualStrings("root", path[start..end]);
 
-    try std.testing.expect(Directory(i32).getNextPathSegment(path, &start, &end));
+    try std.testing.expect(Directory(i32, void).getNextPathSegment(path, &start, &end));
     try std.testing.expectEqual("/root/".len, start);
     try std.testing.expectEqual("/root/folder_a".len, end);
     try std.testing.expectEqualStrings("folder_a", path[start..end]);
 
-    try std.testing.expect(Directory(i32).getNextPathSegment(path, &start, &end));
+    try std.testing.expect(Directory(i32, void).getNextPathSegment(path, &start, &end));
     try std.testing.expectEqual("/root/folder_a/".len, start);
     try std.testing.expectEqual("/root/folder_a/file1.txt".len, end);
     try std.testing.expectEqualStrings("file1.txt", path[start..end]);
 
-    try std.testing.expect(!Directory(i32).getNextPathSegment(path, &start, &end));
+    try std.testing.expect(!Directory(i32, void).getNextPathSegment(path, &start, &end));
 }
 
 test "Create a basic directory structure" {
-    var directory = Directory(i32).init(std.testing.allocator);
+    var directory = Directory(i32, void).init(std.testing.allocator);
     defer directory.deinit();
 
     // Try to write to different files on the same sub-folder
@@ -331,7 +448,7 @@ test "Create a basic directory structure" {
     // Overwrite this last file
     _ = try directory.addFile("/root/folder_b/file2.txt", 20);
 
-    const Entry = Directory(i32).Entry;
+    const Entry = Directory(i32, void).Entry;
 
     // Declare a varaible to hold our entry pointers
     var node: ?*Entry = null;
@@ -365,4 +482,99 @@ test "Create a basic directory structure" {
     node = try directory.getEntry("/root/folder_b/file2.txt");
     try std.testing.expect(node != null);
     try expectEntryFile("file2.txt", @as(i32, 20), node.?.*);
+}
+
+test "Directory manifest reader" {
+    // Initialize the input test data
+    var buffer: [4096]u8 = undefined;
+    // Do this trick because a string literal type is []const u8
+    var input = try std.fmt.bufPrint(&buffer,
+        \\ /root/folder_a/file1.txt;5
+        \\ /root/folder_a/file2.txt;10
+        \\ /root/folder_b/file2.txt;15
+        \\   
+        \\ /root/folder_b/file2.txt;20
+        \\ 
+        \\
+        \\
+    , .{});
+
+    var stream = std.io.fixedBufferStream(input);
+    var reader = stream.reader();
+
+    const Options = struct {
+        pub fn dataFromString(string: []const u8) !i32 {
+            return std.fmt.parseInt(i32, string, 10);
+        }
+    };
+
+    // Initialize the ManifestReader
+    const ManifestReader = Directory(i32, Options).ManifestReader(@TypeOf(reader));
+    var manifest = ManifestReader.init(reader);
+    defer manifest.deinit();
+
+    const Entry = Directory(i32, Options).Entry;
+
+    // Declare a varaible to hold our entry pointers
+    var node: ?Entry = null;
+
+    // Try to get /root/folder_a/file1.txt
+    node = try manifest.next();
+    try std.testing.expect(node != null);
+    try expectEntryFile("/root/folder_a/file1.txt", @as(i32, 5), node.?);
+
+    // Try to get /root/folder_a/file2.txt
+    node = try manifest.next();
+    try std.testing.expect(node != null);
+    try expectEntryFile("/root/folder_a/file2.txt", @as(i32, 10), node.?);
+
+    // Try to get /root/folder_b/file2.txt
+    node = try manifest.next();
+    try std.testing.expect(node != null);
+    try expectEntryFile("/root/folder_b/file2.txt", @as(i32, 15), node.?);
+
+    // Try to get /root/folder_b/file2.txt
+    node = try manifest.next();
+    try std.testing.expect(node != null);
+    try expectEntryFile("/root/folder_b/file2.txt", @as(i32, 20), node.?);
+
+    node = try manifest.next();
+    try std.testing.expect(node == null);
+}
+
+test "Load manifest into a directory object" {
+    // Initialize the input test data
+    var buffer: [4096]u8 = undefined;
+    // Do this trick because a string literal type is []const u8
+    var input = try std.fmt.bufPrint(&buffer,
+        \\ /root/folder_a/file1.txt;5
+        \\ /root/folder_a/file2.txt;10
+        \\ /root/folder_b/file2.txt;15
+        \\   
+        \\ /root/folder_b/file2.txt;20
+        \\ 
+        \\
+        \\
+    , .{});
+
+    var stream = std.io.fixedBufferStream(input);
+    var reader = stream.reader();
+
+    const Options = struct {
+        pub fn dataFromString(string: []const u8) !i32 {
+            return std.fmt.parseInt(i32, string, 10);
+        }
+    };
+
+    // Initialize the ManifestReader
+    const ManifestReader = Directory(i32, Options).ManifestReader(@TypeOf(reader));
+    var manifest = ManifestReader.init(reader);
+    defer manifest.deinit();
+
+    // Configure the directory
+    var directory = Directory(i32, Options).init(std.testing.allocator);
+    defer directory.deinit();
+
+    // Load the files from the manifest
+    try directory.loadFromManifest(&manifest);
 }

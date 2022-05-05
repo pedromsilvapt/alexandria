@@ -161,9 +161,7 @@ pub fn FileHash(comptime algorithm: HashingAlgorithm, comptime Hasher: type) typ
             self.on_hash_progress.trigger(self.hash_tree.shape.nodes);
         }
 
-        pub fn deinit(self: *@This()) void {
-            self.hash_tree.deinit();
-        }
+        
 
         /// Calculates the piece size for a file based on the total file size.
         /// Files up to 50MiB: 32KiB piece size
