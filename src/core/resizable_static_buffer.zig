@@ -70,6 +70,13 @@ pub fn ResizableStaticBuffer(comptime T: type, comptime static_size: usize) type
             }
         }
 
+        /// Acquires a certain amount of buffer space and writes to it the slice we passed
+        pub fn write(self: *@This(), buffer: []const T) !void {
+            var slice = try self.acquire(buffer.len);
+
+            std.mem.copy(T, slice, buffer);
+        }
+
         /// Release a certain amount of space from the buffer
         /// This size should always be less than or equal to the currently
         /// acquired length of the buffer

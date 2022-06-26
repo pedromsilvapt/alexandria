@@ -2,6 +2,11 @@ const std = @import("std");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const ResizableStaticBuffer = @import("./resizable_static_buffer.zig").ResizableStaticBuffer;
+
+// Static buffer size to be used for path names, before the dynamic buffer must be
+// allocated from the heap
+const path_buffer_size = 4096;
 
 /// A Directory represents a list of files organized in an hierarchical fashion. 
 /// Each file can have some data associated with it
@@ -212,17 +217,35 @@ pub fn Directory(comptime FileData: type, comptime Options: type) type {
 
         /// The caller owns the `manifest` object. When this method ends/fails, it is the responsability
         /// of the caller to deinit the manifest.
+        /// `manifest` should be of the type `*ManifestReader(anytype)`
         pub fn loadFromManifest(self: *@This(), manifest: anytype) !void {
             while (try manifest.next()) |entry| {
                 _ = try self.addFile(entry.name, entry.kind.file.data);
             }
         }
 
+        /// Reads the files list from the manifest stored in the provided file
         pub fn loadFromManifestFile(self: *@This(), file_path: []const u8) !void {
             var manifest = try ManifestReader(std.io.reader.Reader).initFromFile(file_path);
             defer manifest.deinit();
 
             try self.loadFromManifest(&manifest);
+        }
+
+        /// The caller owns the `manifest` object. When this method ends/fails,
+        /// it is the responsability of the caller to deinit the manifest.
+        /// `manifest` should be of the type `*ManifestWriter(anytype)`
+        pub fn writeToManifest(self: *@This(), manifest: anytype) !void {
+            try manifest.writeAll(self.allocator, &self.root);
+            try manifest.flush();
+        }
+
+        /// Reads the files list into the manifest stored in the provided file
+        pub fn writeToManifestFile(self: *@This(), file_path: []const u8) !void {
+            var manifest = try ManifestWriter(std.io.writer.Writer).initFromFile(file_path);
+            defer manifest.deinit();
+
+            try self.writeToManifest(&manifest);
         }
 
         /// Return the next path segment. Start is inclusive, end is not inclusive
@@ -302,9 +325,9 @@ pub fn Directory(comptime FileData: type, comptime Options: type) type {
                 }
 
                 pub fn deinit(self: *@This()) void {
-                    if (@hasDecl(@TypeOf(self.io_reader), "close")) {
+                    if (@hasDecl(ReaderType, "close")) {
                         self.io_reader.close();
-                    } else if (@hasDecl(@TypeOf(self.io_reader), "deinit")) {
+                    } else if (@hasDecl(ReaderType, "deinit")) {
                         self.io_reader.deinit();
                     }
                 }
@@ -374,6 +397,153 @@ pub fn Directory(comptime FileData: type, comptime Options: type) type {
                     }
 
                     return result;
+                }
+            };
+        }
+
+        pub fn ManifestWriter(comptime WriterType: type) type {
+            return struct {
+                io_writer: std.io.BufferedWriter(4096, WriterType),
+
+                pub fn init(writer: WriterType) @This() {
+                    return .{
+                        .io_writer = std.io.bufferedWriter(writer),
+                    };
+                }
+
+                pub fn initFromFile(file_path: []const u8) !@This() {
+                    // Open the file
+                    var file: std.fs.File = try std.fs.cwd().openFile(file_path, .{ .write = true });
+
+                    // Initialize the deserializer
+                    return @This().init(file);
+                }
+
+                pub fn deinit(self: *@This()) void {
+                    if (@hasDecl(@TypeOf(self.io_writer), "close")) {
+                        self.io_writer.close();
+                    } else if (@hasDecl(@TypeOf(self.io_writer), "deinit")) {
+                        self.io_writer.deinit();
+                    }
+                }
+
+                /// Writes a single entry to the manifest. If the entry is a folder,
+                /// does nothing.
+                pub fn write(self: *@This(), path: []const u8, entry: *const Entry) !void {
+                    // As of now, we are not writing folders to the manifest file
+                    if (entry.kind == .file) {
+                        // Create a writer from the IO writer
+                        var writer = self.io_writer.writer();
+
+                        if (path.len > 0) {
+                            try writer.writeAll(path);
+
+                            // If this file belongs inside a sub-path, and that sub-path
+                            // does not end in a forward slash '/', we must write it manually
+                            if (path[path.len - 1] != '/') {
+                                try writer.writeByte('/');
+                            }
+                        }
+
+                        // Write the file name
+                        try writer.writeAll(entry.name);
+
+                        // Write the separator
+                        try writer.writeByte(';');
+
+                        // Write the data payload from this file
+                        try Options.dataToWriter(writer, entry.kind.file.data);
+
+                        // And finally write a new line separator
+                        try writer.writeByte('\n');
+                    }
+                }
+
+                /// Writes this entry, and all it's children (if there are any)
+                /// to the manifest file. Folder entries are used to get their
+                /// children files, but the folders themselves are not saved 
+                /// to the manifest
+                pub fn writeAll(self: *@This(), allocator: Allocator, entry: *const Entry) !void {
+                    // Buffer for us to write save the full path of the file as we go down
+                    var path_buffer = ResizableStaticBuffer(u8, path_buffer_size).init(allocator);
+                    defer path_buffer.deinit();
+
+                    // All paths begin with a forward slash
+                    try path_buffer.write("/");
+
+                    var next_node: ?*const Entry = entry;
+
+                    // Because of the way we iterate on the entries to print them,
+                    // we could reach a situation where we would be trying to print
+                    // either a sibling or a parent of this initial entry.
+                    // We do not want that, we only want to print this entry or
+                    // it's descendants, and so we keep their references here so
+                    // we know when we have to stop writing entries
+                    const stop_on_sibling: ?*const Entry = entry._sibling;
+                    const stop_on_parent: ?*const Entry = entry._parent;
+
+                    // NOTE Below, we might call some entries "root" instead of root.
+                    // That's because we do not mean the actual root entry of the tree,
+                    // just the entry that was given as an initial argument to this function
+
+                    while (next_node) |node| {
+                        // If the node is a file, we must write it to the manifest
+                        if (node.kind == .file) {
+                            try self.write(path_buffer.getSliceConst(), node);
+                        }
+
+                        // Determine what our next node should be. First we check if we have children
+                        if (node.kind == .folder and node.kind.folder._child != null) {
+                            // If the node has any children, we don't write it
+                            // Instead, we go to the children first, and later
+                            // we go to this entry's sibling or parent.
+                            next_node = node.kind.folder._child;
+
+                            // Ignore folders with no names (such as the root folder)
+                            if (node.name.len > 0) {
+                                // Append this folder name to the path buffer
+                                try path_buffer.write(node.name);
+                                try path_buffer.write("/");
+                            }
+                        } else if (node._sibling) |sibling| {
+                            // If the sibling of this node is the sibling of the "root" entry, we skip it
+                            if (stop_on_sibling != null and stop_on_sibling.? == sibling) {
+                                next_node = null;
+                            } else {
+                                next_node = sibling;
+                            }
+                        } else if (node._parent) |parent| {
+                            // If we have a parent, then we can assume our parent is a folder (files have no children)
+                            assert(parent.kind == .folder);
+
+                            // If we have a parent, but it is the parent of the "root" entry
+                            if (stop_on_parent != null and stop_on_parent.? == parent) {
+                                next_node = null;
+                            } else {
+                                // We don't need to go to our parent or it's children,
+                                // since we have already traversed through them.
+                                // We can instead go straight to the parent's sibling (can be null)
+                                next_node = parent._sibling;
+                            }
+
+                            // Ignroe folders with no names
+                            if (parent.name.len > 0) {
+                                // We must release the path buffer associated with
+                                // the segment of the parent's node name (the "+ 1"
+                                // represents the forward slash)
+                                path_buffer.release(parent.name.len + 1);
+                            }
+                        } else {
+                            // If our current node has no children, siblings or parent,
+                            // then we have no nodes left to go through
+                            next_node = null;
+                        }
+                    }
+                }
+
+                /// Flush any buffered contents
+                pub fn flush(self: *@This()) !void {
+                    try self.io_writer.flush();
                 }
             };
         }
@@ -577,4 +747,63 @@ test "Load manifest into a directory object" {
 
     // Load the files from the manifest
     try directory.loadFromManifest(&manifest);
+}
+
+test "Load and write manifest into and from a directory object" {
+    // Initialize the input test data
+    var buffer: [4096]u8 = undefined;
+    // Do this trick because a string literal type is []const u8
+    var input = try std.fmt.bufPrint(&buffer,
+        \\ /root/folder_a/file1.txt;5
+        \\ /root/folder_a/file2.txt;10
+        \\ /root/folder_b/file3.txt;15
+        \\ /root/folder_b/file4.txt;20
+        \\
+    , .{});
+
+    var stream_reader = std.io.fixedBufferStream(input);
+    var reader = stream_reader.reader();
+
+    var output: [4096]u8 = undefined;
+    var stream_writer = std.io.fixedBufferStream(&output);
+    var writer = stream_writer.writer();
+
+    const Options = struct {
+        pub fn dataFromString(string: []const u8) !i32 {
+            return std.fmt.parseInt(i32, string, 10);
+        }
+
+        pub fn dataToWriter(io_writer: anytype, number: i32) !void {
+            try io_writer.print("{}", .{number});
+        }
+    };
+
+    // Initialize the ManifestReader
+    const ManifestReader = Directory(i32, Options).ManifestReader(@TypeOf(reader));
+    var manifest_reader = ManifestReader.init(reader);
+    defer manifest_reader.deinit();
+
+    // Initialize the ManifestWriter
+    const ManifestWriter = Directory(i32, Options).ManifestWriter(@TypeOf(writer));
+    var manifest_writer = ManifestWriter.init(writer);
+    defer manifest_writer.deinit();
+
+    // Configure the directory
+    var directory = Directory(i32, Options).init(std.testing.allocator);
+    defer directory.deinit();
+
+    // Load the files from the manifest
+    try directory.loadFromManifest(&manifest_reader);
+
+    // Write the files into the manifest
+    try directory.writeToManifest(&manifest_writer);
+
+    // Compare the results
+    try std.testing.expectEqualStrings(
+        \\/root/folder_b/file4.txt;20
+        \\/root/folder_b/file3.txt;15
+        \\/root/folder_a/file2.txt;10
+        \\/root/folder_a/file1.txt;5
+        \\
+    , stream_writer.getWritten());
 }
